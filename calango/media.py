@@ -295,6 +295,14 @@ class Image(np.ndarray):
                                  180: cv2.ROTATE_180
                                  }.get(degrees))
 
+    def put_on_center(self, img):
+        img = Image(img)
+        x, y = self.center_position
+        x1 = x - img.width // 2
+        y1 = y - img.height // 2
+        self[y1:y1 + img.height, x1: x1 + img.width] = img
+        return self
+
     def crop_by_center(self, size=None, keep_scale=False) -> Image:
         assert size is None or isinstance(size, (list, tuple)) and cj.is_numeric_sequence(size) and len(
                 size) == 2, 'Send HxW image cropped output'
