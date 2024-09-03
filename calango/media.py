@@ -180,22 +180,55 @@ class Image(np.ndarray):
     def get_color_percentage(self, min_color, max_color):
         return self.calculate_color_percentage(self, self.parse_color(min_color), self.parse_color(max_color))
 
-    def match_template(self, template: Union[np.ndarray, List[np.ndarray]], method=cv2.TM_CCOEFF_NORMED, treshold=0.5):
+    def similarity(self, image: Image, method=cv2.TM_CCOEFF_NORMED):
+        result = cv2.matchTemplate(self, image, method)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        return max_val
+
+    def _padding_points(self, points, distance: 0):
+        if not len(points):
+            return []
+        points = cj.geolinear.find_best_locations(points, distance)
+        return points
+
+    def _match_template(self, template: np.ndarray, method=cv2.TM_CCOEFF_NORMED, threshold=None, all_locations=False,
+                        distance_between_points=1):
+        threshold = threshold or 0.0
+        result = []
+        res = cv2.matchTemplate(self, template, method)
+        if all_locations:
+            loc = np.where(res >= threshold)
+            for n, pt in enumerate(zip(*loc[::-1])):
+                acc = res[pt[1], pt[0]]
+                result.append([int(pt[0] + template.shape[1] // 2), int(pt[1] + template.shape[0] // 2), acc])
+        else:
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if max_val >= threshold:
+                result.append(
+                        [int(max_loc[0] + template.shape[1] // 2), int(max_loc[1] + template.shape[0] // 2), max_val])
+
+        if distance_between_points > 1:
+            result = self._padding_points(result, distance_between_points)
+        return result
+
+    def match_template(self, template: Union[np.ndarray, List[np.ndarray]], method=cv2.TM_CCOEFF_NORMED,
+                       threshold=None, all_locations=False, distance_between_points=1):
+        threshold = threshold or 0.0
+
         result = []
         if not isinstance(template, list):
             template = [template]
         for template in template:
-            res = cv2.matchTemplate(self, template, method)
-            _, max_val, _, max_loc = cv2.minMaxLoc(res)
-
-            # Armazena valores e localizações de correspondências de alta qualidade
-            if max_val >= treshold:
-                # values.append(max_val)
-                h, w = template.shape[:2]
-                result.append([(int(max_loc[0] + w // 2), int(max_loc[1] + h // 2)), max_val])
-            else:
-                result.append([[0, 0], 0])
+            res = self._match_template(template, method, threshold, all_locations=all_locations,
+                                       distance_between_points=distance_between_points)
+            result.extend(res)
         return result
+
+    def find_locations_by_color(self, color, distance_between_points=1):
+
+        mask = self.get_color_mask(*self.color_range(color))
+        positions = np.where(mask == 255)[::-1]
+        return self._padding_points(list(zip(*positions)), distance_between_points)
 
     @property
     def mask(self):
@@ -449,6 +482,10 @@ class Image(np.ndarray):
         position = position or self.center_position
         radius = radius or self.min_len // 2
         cv2.circle(self, position, radius, color, thickness)
+        return self
+
+    def rect(self, start, end, color=(0, 0, 0), thickness=1):
+        cv2.rectangle(self, start, end, color, thickness)
         return self
 
     def get_mask_circle(self, radius=None, position=None):
