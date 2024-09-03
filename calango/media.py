@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 from abc import abstractmethod
-from typing import Union, Tuple, Sequence, Iterator
+from typing import Union, Tuple, Sequence, Iterator, List
 from urllib.parse import urlparse
 import cereja as cj
 import cv2
@@ -33,6 +33,14 @@ def is_url(val):
 class Image(np.ndarray):
     _GRAY_SCALE = 'GRAY_SCALE'
     _color_mode = 'BGR'
+    COLORS_RANGE = {
+        'red':     (np.array([0, 0, 100]), np.array([80, 80, 255])),
+        'green':   (np.array([0, 100, 0]), np.array([80, 255, 80])),
+        'blue':    (np.array([100, 0, 0]), np.array([255, 80, 80])),
+        'yellow':  (np.array([0, 100, 100]), np.array([80, 255, 255])),
+        'cyan':    (np.array([100, 100, 0]), np.array([255, 255, 80])),
+        'magenta': (np.array([100, 0, 100]), np.array([255, 80, 255])),
+    }
 
     def __new__(cls, im: Union[str, np.ndarray] = None, color_mode: str = 'BGR', shape=None, dtype=None,
                 **kwargs) -> 'Image':
@@ -98,6 +106,129 @@ class Image(np.ndarray):
 
     def set_border(self, size: int = 1, color: Tuple[int, int, int] = (0, 255, 0)):
         cv2.rectangle(self, (size, size), (self.width - 1, self.height - 1), color, size)
+
+    def color_range(self, color: str):
+        assert color in self.COLORS_RANGE, f'Color {color} is not valid.'
+        return self.COLORS_RANGE[color]
+
+    def get_color_mask(self, lower, upper):
+        return cv2.inRange(self, lower, upper)
+
+    @staticmethod
+    def calculate_color_percentage(img, lower_bgr, upper_bgr):
+
+        # Create a mask with the pixels that fall within the color range
+        color_mask = cv2.inRange(img, lower_bgr, upper_bgr)
+
+        # Count the number of pixels in the color range
+        color_pixel_count = np.count_nonzero(color_mask)
+
+        # Count the total number of pixels in the image
+        total_pixels = img.shape[0] * img.shape[1]
+
+        # Calculate the percentage of the color
+        color_percentage = (color_pixel_count / total_pixels) * 100
+        return color_percentage
+
+    def get_strides(self, kernel_size, strides=1):
+        """
+        Returns batches of fixed window size (kernel_size) with a given stride
+        @param kernel_size: window size
+        @param strides: default is 1
+        """
+        for i in range(0, self.shape[0] - kernel_size + 1, strides):
+            for j in range(0, self.shape[1] - kernel_size + 1, strides):
+                yield self[i:i + kernel_size, j:j + kernel_size]
+
+    @property
+    def blue_percentage(self):
+        return self.calculate_color_percentage(self, *self.color_range('blue'))
+
+    @property
+    def green_percentage(self):
+        return self.calculate_color_percentage(self, *self.color_range('green'))
+
+    @property
+    def red_percentage(self):
+        return self.calculate_color_percentage(self, *self.color_range('red'))
+
+    @property
+    def yellow_percentage(self):
+        return self.calculate_color_percentage(self, *self.color_range('yellow'))
+
+    @property
+    def cyan_percentage(self):
+        return self.calculate_color_percentage(self, *self.color_range('cyan'))
+
+    @property
+    def magenta_percentage(self):
+        return self.calculate_color_percentage(self, *self.color_range('magenta'))
+
+    def hex_to_bgr(self, hex_color):
+        return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+    def bgr_to_hex(self, bgr_color):
+        return '%02x%02x%02x' % bgr_color
+
+    def parse_color(self, color):
+        if isinstance(color, str):
+            if color.startswith('#'):
+                return self.hex_to_bgr(color[1:])
+            return self.hex_to_bgr(color)
+        return color
+
+    def get_color_percentage(self, min_color, max_color):
+        return self.calculate_color_percentage(self, self.parse_color(min_color), self.parse_color(max_color))
+
+    def similarity(self, image: Image, method=cv2.TM_CCOEFF_NORMED):
+        result = cv2.matchTemplate(self, image, method)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        return max_val
+
+    def _padding_points(self, points, distance: 0):
+        if not len(points):
+            return []
+        points = cj.geolinear.find_best_locations(points, distance)
+        return points
+
+    def _match_template(self, template: np.ndarray, method=cv2.TM_CCOEFF_NORMED, threshold=None, all_locations=False,
+                        distance_between_points=1):
+        threshold = threshold or 0.0
+        result = []
+        res = cv2.matchTemplate(self, template, method)
+        if all_locations:
+            loc = np.where(res >= threshold)
+            for n, pt in enumerate(zip(*loc[::-1])):
+                acc = res[pt[1], pt[0]]
+                result.append([int(pt[0] + template.shape[1] // 2), int(pt[1] + template.shape[0] // 2), acc])
+        else:
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if max_val >= threshold:
+                result.append(
+                        [int(max_loc[0] + template.shape[1] // 2), int(max_loc[1] + template.shape[0] // 2), max_val])
+
+        if distance_between_points > 1:
+            result = self._padding_points(result, distance_between_points)
+        return result
+
+    def match_template(self, template: Union[np.ndarray, List[np.ndarray]], method=cv2.TM_CCOEFF_NORMED,
+                       threshold=None, all_locations=False, distance_between_points=1):
+        threshold = threshold or 0.0
+
+        result = []
+        if not isinstance(template, list):
+            template = [template]
+        for template in template:
+            res = self._match_template(template, method, threshold, all_locations=all_locations,
+                                       distance_between_points=distance_between_points)
+            result.extend(res)
+        return result
+
+    def find_locations_by_color(self, color, distance_between_points=1):
+
+        mask = self.get_color_mask(*self.color_range(color))
+        positions = np.where(mask == 255)[::-1]
+        return self._padding_points(list(zip(*positions)), distance_between_points)
 
     @property
     def mask(self):
@@ -295,6 +426,14 @@ class Image(np.ndarray):
                                  180: cv2.ROTATE_180
                                  }.get(degrees))
 
+    def put_on_center(self, img):
+        img = Image(img)
+        x, y = self.center_position
+        x1 = x - img.width // 2
+        y1 = y - img.height // 2
+        self[y1:y1 + img.height, x1: x1 + img.width] = img
+        return self
+
     def crop_by_center(self, size=None, keep_scale=False) -> Image:
         assert size is None or isinstance(size, (list, tuple)) and cj.is_numeric_sequence(size) and len(
                 size) == 2, 'Send HxW image cropped output'
@@ -343,6 +482,10 @@ class Image(np.ndarray):
         position = position or self.center_position
         radius = radius or self.min_len // 2
         cv2.circle(self, position, radius, color, thickness)
+        return self
+
+    def rect(self, start, end, color=(0, 0, 0), thickness=1):
+        cv2.rectangle(self, start, end, color, thickness)
         return self
 
     def get_mask_circle(self, radius=None, position=None):
